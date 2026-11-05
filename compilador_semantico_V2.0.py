@@ -1,4 +1,5 @@
 import re
+import os
 import tkinter as tk
 from tkinter import ttk
 
@@ -10,7 +11,7 @@ REGEX_NOMBRE = r"re[A-Z][a-z]+"
 
 OPERADORES = ["+", "-", "*", "/"]
 RELACIONALES = [">", "<", ">=", "<=", "==", "!="]
-SIMBOLOS = ["(", ")", ",", ";", ":", "=", "--", "++", "{", "}"] + OPERADORES + RELACIONALES
+SIMBOLOS = ["(", ")", ",", ";", ":", "=", "--", "++", "{", "}", "&&", "||"] + OPERADORES + RELACIONALES
 
 OPERADORES_PERMITIDOS = {
     "ENTER": ["+", "-", "*"],
@@ -18,7 +19,7 @@ OPERADORES_PERMITIDOS = {
     "CADER": ["+", "-"],
 }
 
-PATRON_TOKENS = r'[“"][^”"]*[”"]|\d+\.\d+|\d+|[^\W\d]\w*|-\s*-|\+\+|[<>=!]=|[+\-*/(),;:<>={}]|\S'
+PATRON_TOKENS = r'[“"][^”"]*[”"]|\d+\.\d+|\d+|[^\W\d]\w*|-\s*-|\+\+|&&|\|\||[<>=!]=|[+\-*/(),;:<>={}]|\S'
 
 # tablas
 tabla_simbolos = []
@@ -27,6 +28,11 @@ errores_pendientes = []
 variables = {}
 funciones = {}
 funcion_actual = {}
+tabla_triplo = []
+temporales = []
+funciones_triplo = {}
+ciclos_triplo = []
+expandiendo = []
 
 
 def agregar_error(lexema, renglon, descripcion):
@@ -293,68 +299,87 @@ def revisar_asignacion(tokens, renglon):
         revisar_tipos(elementos, buscar_variable(destino), renglon)
 
     agregar_simbolos(tokens)
+    triplo_asignacion(destino, elementos)
 
 
-def revisar_while(tokens, renglon):
-    cuerpo = quitar_punto_y_coma(tokens)
-    
-    # Detectamos si el usuario intenta declarar la variable dentro del while
-    # Ej: while ( ENTER reContador < 5 ) -> Son 7 tokens
-    tiene_declaracion = (len(cuerpo) == 7 and cuerpo[2] in TIPOS)
-    
-    bien_escrito = False
-    
-    if tiene_declaracion:
-        # Estructura: while ( TIPO variable relacional operando )
-        bien_escrito = (cuerpo[1] == "(" and cuerpo[6] == ")" and
-                        es_palabra(cuerpo[3]) and 
-                        (cuerpo[4] in RELACIONALES or cuerpo[4] == "=") and
-                        es_operando(cuerpo[5]))
-    else:
-        # Estructura clásica: while ( variable relacional operando )
-        bien_escrito = (len(cuerpo) == 6 and cuerpo[1] == "(" and cuerpo[5] == ")" and
-                        es_operando(cuerpo[2]) and 
-                        (cuerpo[3] in RELACIONALES or cuerpo[3] == "=") and
-                        es_operando(cuerpo[4]))
-                        
-    if not bien_escrito:
-        return
+def separar_condiciones(partes):
+    condiciones = [[]]
+    conectores = []
+    for t in partes:
+        if t in ["&&", "||"]:
+            conectores.append(t)
+            condiciones.append([])
+        else:
+            condiciones[-1].append(t)
+    return condiciones, conectores
 
-    # Extraemos los datos dependiendo de si se declaró ahí o no
-    if tiene_declaracion:
-        tipo_decl = cuerpo[2]
-        izquierda = cuerpo[3]
-        operador = cuerpo[4]
-        derecha = cuerpo[5]
-        
-        # ¡NUEVO!: Registramos la variable para que exista en el ámbito de la función
+
+def condicion_bien_escrita(condicion):
+    # while ( TIPO variable relacional operando )  o  while ( variable relacional operando )
+    if len(condicion) == 4 and condicion[0] in TIPOS:
+        return (es_palabra(condicion[1]) and
+                (condicion[2] in RELACIONALES or condicion[2] == "=") and
+                es_operando(condicion[3]))
+    return (len(condicion) == 3 and es_operando(condicion[0]) and
+            (condicion[1] in RELACIONALES or condicion[1] == "=") and
+            es_operando(condicion[2]))
+
+
+def revisar_condicion(condicion, renglon, ya_reportadas):
+    if condicion[0] in TIPOS:
+        izquierda = condicion[1]
+        derecha = condicion[3]
         ambito = ambito_actual()
         if re.fullmatch(REGEX_NOMBRE, izquierda) is None:
             agregar_error(izquierda, renglon, "Variable indefinida")
         elif izquierda in ambito:
             agregar_error(izquierda, renglon, "Declaración duplicada")
         else:
-            ambito[izquierda] = tipo_decl
+            ambito[izquierda] = condicion[0]
+        elementos_a_revisar = [derecha]
     else:
-        izquierda = cuerpo[2]
-        operador = cuerpo[3]
-        derecha = cuerpo[4]
+        izquierda = condicion[0]
+        derecha = condicion[2]
+        elementos_a_revisar = [izquierda, derecha]
 
-
-    # Revisiones semánticas de compatibilidad de tipos
-    elementos_a_revisar = [derecha] if tiene_declaracion else [izquierda, derecha]
-    if not revisar_indefinidas(elementos_a_revisar, renglon):
+    nuevos = [e for e in elementos_a_revisar if e not in ya_reportadas]
+    ya_reportadas.extend(nuevos)
+    if not revisar_indefinidas(nuevos, renglon):
         tipo_izq = tipo_de(izquierda)
         tipo_der = tipo_de(derecha)
         if tipo_izq != "" and tipo_der != "" and not es_compatible(tipo_izq, tipo_der):
             agregar_error(derecha, renglon, "Incompatibilidad de tipos, " + tipo_izq)
 
+
+def revisar_while(tokens, renglon):
+    cuerpo = quitar_punto_y_coma(tokens)
+    if len(cuerpo) < 3 or cuerpo[1] != "(" or cuerpo[-1] != ")":
+        return
+
+    condiciones, conectores = separar_condiciones(cuerpo[2:-1])
+    for condicion in condiciones:
+        if not condicion_bien_escrita(condicion):
+            return
+
+    ya_reportadas = []
+    for condicion in condiciones:
+        revisar_condicion(condicion, renglon, ya_reportadas)
+
     agregar_simbolos(tokens)
+    triplo_while(condiciones, conectores)
 
 
 def revisar_endwhile(tokens):
     if quitar_punto_y_coma(tokens) == ["endwhile"]:
         agregar_simbolos(tokens)
+        triplo_endwhile()
+
+
+def revisar_incremento(tokens, renglon):
+    cuerpo = quitar_punto_y_coma(tokens)
+    revisar_indefinidas([cuerpo[0]], renglon)
+    agregar_simbolos(tokens)
+    triplo_asignacion(cuerpo[0], [cuerpo[0], cuerpo[1][0], "1"])
 
 
 # revision de funciones
@@ -379,6 +404,7 @@ def cerrar_funcion():
     tipo = funcion_actual["tipo"]
     if tipo in TIPOS and not funcion_actual["retorna"]:
         agregar_error(funcion_actual["nombre"], funcion_actual["renglon"], "Incompatibilidad de tipos, " + tipo)
+    triplo_cerrar_funcion(funcion_actual["triplo"])
     funcion_actual.clear()
 
 
@@ -410,6 +436,7 @@ def revisar_funcion(tokens, renglon):
         funciones[nombre] = (tipo, [tipo_parametro for tipo_parametro, _ in parametros])
 
     abrir_funcion(nombre, tipo, parametros, renglon)
+    funcion_actual["triplo"] = triplo_abrir_funcion(nombre, parametros)
     agregar_simbolos(tokens)
 
 
@@ -434,6 +461,7 @@ def revisar_retorno(tokens, renglon):
                 revisar_tipos(elementos, tipo, renglon)
 
     agregar_simbolos(tokens)
+    triplo_retorno(funcion_actual["triplo"], expresion)
 
 
 def revisar_llaves(tokens):
@@ -453,6 +481,221 @@ def revisar_llamada(tokens, renglon):
     if not revisar_indefinidas(elementos, renglon):
         revisar_argumentos(elementos[0], renglon)
     agregar_simbolos(tokens)
+    temporales.clear()
+    triplo_llamada(elementos[0], False)
+
+
+# generacion del triplo (posfijo)
+PRECEDENCIA = {"+": 1, "-": 1, "*": 2, "/": 2}
+
+
+def siguiente_fila():
+    return len(tabla_triplo) + 1
+
+
+def agregar_triplo(objeto, fuente, operador):
+    tabla_triplo.append([siguiente_fila(), objeto, fuente, operador])
+    return len(tabla_triplo)
+
+
+def nuevo_temporal():
+    numero = 1
+    while "T" + str(numero) in temporales:
+        numero = numero + 1
+    temporales.append("T" + str(numero))
+    return "T" + str(numero)
+
+
+def liberar_temporal(dato):
+    if dato in temporales:
+        temporales.remove(dato)
+
+
+def a_posfijo(elementos):
+    salida = []
+    pila = []
+    for e in elementos:
+        if isinstance(e, str) and e in OPERADORES:
+            while pila and PRECEDENCIA[pila[-1]] >= PRECEDENCIA[e]:
+                salida.append(pila.pop())
+            pila.append(e)
+        else:
+            salida.append(e)
+    while pila:
+        salida.append(pila.pop())
+    return salida
+
+
+def triplo_expresion(elementos):
+    if len(elementos) > 1 and elementos[-1] in ["--", "++"]:
+        elementos = elementos[:-1] + [elementos[-1][0], "1"]
+
+    pila = []
+    for e in a_posfijo(elementos):
+        if isinstance(e, tuple):
+            pila.append(triplo_llamada(e, True))
+        elif e in OPERADORES:
+            derecha = pila.pop()
+            izquierda = pila.pop()
+            if izquierda not in temporales:
+                temporal = nuevo_temporal()
+                agregar_triplo(temporal, izquierda, "=")
+                izquierda = temporal
+            agregar_triplo(izquierda, derecha, e)
+            liberar_temporal(derecha)
+            pila.append(izquierda)
+        else:
+            pila.append(e)
+
+    resultado = pila.pop()
+    if resultado not in temporales:
+        temporal = nuevo_temporal()
+        agregar_triplo(temporal, resultado, "=")
+        resultado = temporal
+    return resultado
+
+
+def triplo_asignacion(destino, elementos):
+    temporales.clear()
+    resultado = triplo_expresion(elementos)
+    agregar_triplo(destino, resultado, "=")
+    temporales.clear()
+
+
+def triplo_llamada(llamada, con_valor):
+    nombre = llamada[1]
+    argumentos = llamada[2]
+    if nombre not in funciones_triplo:
+        return nombre
+    datos = funciones_triplo[nombre]
+
+    for i in range(min(len(argumentos), len(datos["parametros"]))):
+        temporal = nuevo_temporal()
+        agregar_triplo(temporal, argumentos[i], "=")
+        agregar_triplo(datos["parametros"][i], temporal, "=")
+        liberar_temporal(temporal)
+    agregar_triplo("", datos["inicio"], "JMP")
+
+    if datos["regreso"] is None:
+        datos["regreso"] = siguiente_fila()
+        for fila in datos["saltos_return"]:
+            tabla_triplo[fila - 1][2] = datos["regreso"]
+
+    if not con_valor:
+        return None
+    if datos["valor"] is None or nombre in expandiendo:
+        return nombre
+    expandiendo.append(nombre)
+    resultado = triplo_expresion(datos["valor"])
+    expandiendo.remove(nombre)
+    return resultado
+
+
+def triplo_abrir_funcion(nombre, parametros):
+    salto = agregar_triplo("", "", "JMP")
+    datos = {
+        "salto": salto,
+        "inicio": siguiente_fila(),
+        "parametros": [nombre_parametro for _, nombre_parametro in parametros],
+        "saltos_return": [],
+        "regreso": None,
+        "valor": None,
+        "tiene_return": False,
+    }
+    if nombre not in funciones_triplo:
+        funciones_triplo[nombre] = datos
+    return datos
+
+
+def triplo_cerrar_funcion(datos):
+    if not datos["tiene_return"]:
+        datos["saltos_return"].append(agregar_triplo("", datos["regreso"] or "", "JMP"))
+    fin = siguiente_fila()
+    tabla_triplo[datos["salto"] - 1][2] = fin
+    if datos["regreso"] is None:
+        for fila in datos["saltos_return"]:
+            tabla_triplo[fila - 1][2] = fin
+
+
+def triplo_retorno(datos, expresion):
+    datos["tiene_return"] = True
+    if len(expresion) == 1 and expresion[0] in TIPOS:
+        datos["valor"] = expresion
+    elif expresion != []:
+        elementos = leer_expresion(expresion)
+        if elementos is not None:
+            datos["valor"] = elementos
+    datos["saltos_return"].append(agregar_triplo("", datos["regreso"] or "", "JMP"))
+
+
+def triplo_while(condiciones, conectores):
+    ciclo = {"inicio": siguiente_fila(), "salidas": []}
+    inicios = []
+    filas_true = []
+    filas_false = []
+    for condicion in condiciones:
+        if condicion[0] in TIPOS:
+            condicion = condicion[1:]
+        temporales.clear()
+        inicios.append(siguiente_fila())
+        temporal = nuevo_temporal()
+        agregar_triplo(temporal, condicion[0], "=")
+        agregar_triplo(temporal, condicion[2], condicion[1])
+        filas_true.append(agregar_triplo("", "TRUE", ""))
+        filas_false.append(agregar_triplo("", "FALSE", ""))
+    temporales.clear()
+
+    for i in range(len(condiciones)):
+        if i < len(conectores) and conectores[i] == "&&":
+            tabla_triplo[filas_true[i] - 1][3] = inicios[i + 1]
+        else:
+            tabla_triplo[filas_true[i] - 1][3] = siguiente_fila()
+
+        destino = None
+        for j in range(i, len(conectores)):
+            if conectores[j] == "||":
+                destino = inicios[j + 1]
+                break
+        if destino is None:
+            ciclo["salidas"].append(filas_false[i])
+        else:
+            tabla_triplo[filas_false[i] - 1][3] = destino
+
+    ciclos_triplo.append(ciclo)
+
+
+def triplo_endwhile():
+    if not ciclos_triplo:
+        return
+    ciclo = ciclos_triplo.pop()
+    agregar_triplo("", ciclo["inicio"], "JMP")
+    for fila in ciclo["salidas"]:
+        tabla_triplo[fila - 1][3] = siguiente_fila()
+
+
+def terminar_triplo():
+    for ciclo in ciclos_triplo:
+        for fila in ciclo["salidas"]:
+            tabla_triplo[fila - 1][3] = siguiente_fila()
+    if tabla_triplo:
+        agregar_triplo("", "", "")
+
+
+# archivo del triplo
+def guardar_triplo():
+    carpeta = os.path.dirname(os.path.abspath(__file__))
+    encabezados = ["N. de fila", "Dato Objeto", "Dato Fuente", "Operador"]
+    filas = [encabezados] + [[str(dato) for dato in fila] for fila in tabla_triplo]
+    anchos = [max(len(fila[i]) for fila in filas) + 2 for i in range(4)]
+    separador = "+" + "+".join("-" * ancho for ancho in anchos) + "+"
+
+    with open(os.path.join(carpeta, "triplo.txt"), "w", encoding="utf-8") as archivo:
+        archivo.write(separador + "\n")
+        for numero, fila in enumerate(filas):
+            archivo.write("|" + "|".join(fila[i].center(anchos[i]) for i in range(4)) + "|\n")
+            if numero == 0:
+                archivo.write(separador + "\n")
+        archivo.write(separador + "\n")
 
 
 # analisis del codigo
@@ -489,6 +732,8 @@ def analizar_linea(linea, renglon):
                 revisar_funcion(tokens, renglon)
             else:
                 revisar_llamada(tokens, renglon)
+        elif quitar_punto_y_coma(tokens)[1:] in [["--"], ["++"]]:
+            revisar_incremento(tokens, renglon)
         else:
             revisar_asignacion(tokens, renglon)
 
@@ -500,6 +745,11 @@ def analizar_codigo(codigo):
     variables.clear()
     funciones.clear()
     funcion_actual.clear()
+    tabla_triplo.clear()
+    temporales.clear()
+    funciones_triplo.clear()
+    ciclos_triplo.clear()
+    expandiendo.clear()
 
     renglon = 0
     for linea in codigo.split("\n"):
@@ -510,6 +760,7 @@ def analizar_codigo(codigo):
 
     if funcion_actual:
         cerrar_funcion()
+    terminar_triplo()
 
     errores_pendientes.sort(key=lambda error: error[0])
     numero = 0
@@ -601,6 +852,7 @@ def main():
             arbol_simbolos.insert("", "end", values=simbolo)
         for error in tabla_errores:
             arbol_errores.insert("", "end", values=error)
+        guardar_triplo()
 
     def boton_limpiar():
         caja_codigo.delete("1.0", "end")
