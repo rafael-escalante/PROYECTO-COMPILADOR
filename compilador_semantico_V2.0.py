@@ -143,9 +143,15 @@ def leer_expresion(partes):
     elementos = []
     i = 0
     espero_operando = True
+    abiertos = 0
     while i < len(partes):
         t = partes[i]
         if espero_operando:
+            if t == "(":
+                abiertos = abiertos + 1
+                elementos.append(t)
+                i = i + 1
+                continue
             if es_palabra(t) and i + 1 < len(partes) and partes[i + 1] == "(":
                 if ")" not in partes[i + 2:]:
                     return None
@@ -162,13 +168,15 @@ def leer_expresion(partes):
                 return None
             espero_operando = False
         else:
-            if t in OPERADORES:
+            if t == ")" and abiertos > 0:
+                abiertos = abiertos - 1
+            elif t in OPERADORES:
                 espero_operando = True
             elif not (t in ["--", "++"] and i == len(partes) - 1):
                 return None
             elementos.append(t)
             i = i + 1
-    if espero_operando:
+    if espero_operando or abiertos != 0:
         return None
     return elementos
 
@@ -225,6 +233,8 @@ def revisar_tipos(elementos, tipo, renglon):
             if not es_compatible(tipo, funciones[nombre][0]):
                 agregar_error(nombre, renglon, "Incompatibilidad de tipos, " + tipo)
             revisar_argumentos(e, renglon)
+        elif e in ["(", ")"]:
+            continue
         elif e in OPERADORES or e in ["--", "++"]:
             if e[0] not in OPERADORES_PERMITIDOS[tipo]:
                 agregar_error(e, renglon, "Incompatibilidad de tipos, " + tipo)
@@ -515,8 +525,14 @@ def a_posfijo(elementos):
     salida = []
     pila = []
     for e in elementos:
-        if isinstance(e, str) and e in OPERADORES:
-            while pila and PRECEDENCIA[pila[-1]] >= PRECEDENCIA[e]:
+        if e == "(":
+            pila.append(e)
+        elif e == ")":
+            while pila[-1] != "(":
+                salida.append(pila.pop())
+            pila.pop()
+        elif isinstance(e, str) and e in OPERADORES:
+            while pila and pila[-1] != "(" and PRECEDENCIA[pila[-1]] >= PRECEDENCIA[e]:
                 salida.append(pila.pop())
             pila.append(e)
         else:
